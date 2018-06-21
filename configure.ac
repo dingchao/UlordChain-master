@@ -12,6 +12,12 @@ AC_CONFIG_HEADERS([src/config/ulord-config.h])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([build-aux/m4])
 
+dnl Unless the user specified ARFLAGS, force it to be cr
+AC_ARG_VAR(ARFLAGS, [Flags for the archiver, defaults to <cr> if not set])
+if test "x${ARFLAGS+set}" != "xset"; then
+  ARFLAGS="cr"
+fi
+
 AC_CANONICAL_HOST
 
 AH_TOP([#ifndef UC_CONFIG_H])
@@ -38,7 +44,6 @@ else
   CXXFLAGS_overridden=no
 fi
 AC_PROG_CXX
-m4_ifdef([AC_PROG_OBJCXX],[AC_PROG_OBJCXX])
 
 dnl By default, libtool for mingw refuses to link static libs into a dll for
 dnl fear of mixing pic/non-pic objects, and import/export complications. Since
@@ -48,6 +53,20 @@ case $host in
      lt_cv_deplibs_check_method="pass_all"
   ;;
 esac
+dnl Require C++11 compiler (no GNU extensions)
+AX_CXX_COMPILE_STDCXX([11], [noext], [mandatory], [nodefault])
+dnl Check if -latomic is required for <std::atomic>
+CHECK_ATOMIC
+
+dnl Unless the user specified OBJCXX, force it to be the same as CXX. This ensures
+dnl that we get the same -std flags for both.
+m4_ifdef([AC_PROG_OBJCXX],[
+if test "x${OBJCXX+set}" = "x"; then
+  OBJCXX="${CXX}"
+fi
+AC_PROG_OBJCXX
+])
+
 dnl Libtool init checks.
 LT_INIT([pic-only])
 
@@ -66,9 +85,7 @@ AC_PATH_PROG(XGETTEXT,xgettext)
 AC_PATH_PROG(HEXDUMP,hexdump)
 AC_PATH_TOOL(READELF, readelf)
 AC_PATH_TOOL(CPPFILT, c++filt)
-
-dnl pkg-config check.
-PKG_PROG_PKG_CONFIG
+AC_PATH_TOOL(OBJCOPY, objcopy)
 
 # Enable wallet
 AC_ARG_ENABLE([wallet],
@@ -373,6 +390,16 @@ else
   AC_SUBST(COMPARISON_TOOL_REORG_TESTS, 0)
 fi
 
+if test x$use_pkgconfig = xyes; then
+  m4_ifndef([PKG_PROG_PKG_CONFIG], [AC_MSG_ERROR(PKG_PROG_PKG_CONFIG macro not found. Please install pkg-config and re-run autogen.sh.)])
+  m4_ifdef([PKG_PROG_PKG_CONFIG], [
+  PKG_PROG_PKG_CONFIG
+  if test x"$PKG_CONFIG" = "x"; then
+    AC_MSG_ERROR(pkg-config not found.)
+  fi
+  ])
+fi
+
 if test x$use_extended_rpc_tests != xno; then
   AC_SUBST(EXTENDED_RPC_TESTS, -extended)
 fi
@@ -462,10 +489,9 @@ fi
 
 if test x$use_hardening != xno; then
   AX_CHECK_COMPILE_FLAG([-maes],[HARDENED_CFLAGS="$HARDENED_CFLAGS -maes"])
+  AX_CHECK_COMPILE_FLAG([-std=c++11],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -std=c++11"])
   AX_CHECK_COMPILE_FLAG([-Wstack-protector],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -Wstack-protector"])
   AX_CHECK_COMPILE_FLAG([-fstack-protector-all],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -fstack-protector-all"])
-  AX_CHECK_COMPILE_FLAG([-std=c++11],[HARDENED_CXXFLAGS="$HARDENED_CXXFLAGS -std=c++11"])
-  AX_CHECK_COMPILE_FLAG([-std=c11],[HARDENED_CFLAGS="${HARDENED_CLFAGS -std=c11}"])
 
   AX_CHECK_PREPROC_FLAG([-D_FORTIFY_SOURCE=2],[
     AX_CHECK_PREPROC_FLAG([-U_FORTIFY_SOURCE],[
@@ -479,10 +505,7 @@ if test x$use_hardening != xno; then
   AX_CHECK_LINK_FLAG([[-Wl,-z,relro]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,relro"])
   AX_CHECK_LINK_FLAG([[-Wl,-z,now]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -Wl,-z,now"])
 
-  if test x$TARGET_OS != xwindows; then
-    AX_CHECK_COMPILE_FLAG([-fPIE],[PIE_FLAGS="-fPIE"])
-    AX_CHECK_LINK_FLAG([[-pie]], [HARDENED_LDFLAGS="$HARDENED_LDFLAGS -pie"])
-  fi
+
 
   case $host in
     *mingw*)
@@ -779,6 +802,15 @@ else
     AC_DEFINE_UNQUOTED([ENABLE_ZMQ],[0],[Define to 1 to enable ZMQ functions])
   fi
 
+  if test "x$use_zmq" = "xyes"; then
+    dnl Assume libzmq was built for static linking
+    case $host in
+      *mingw*)
+        ZMQ_CFLAGS="$ZMQ_CFLAGS -DZMQ_STATIC"
+      ;;
+    esac
+  fi
+
   BITCOIN_QT_CHECK(AC_CHECK_LIB([protobuf] ,[main],[PROTOBUF_LIBS=-lprotobuf], BITCOIN_QT_FAIL(libprotobuf not found)))
   if test x$use_qr != xno; then
     BITCOIN_QT_CHECK([AC_CHECK_LIB([qrencode], [main],[QR_LIBS=-lqrencode], [have_qrencode=no])])
@@ -1029,3 +1061,32 @@ case ${OS} in
      mv qa/pull-tester/tests_config-2.py qa/pull-tester/tests_config.py
    ;;
 esac
+
+
+echo
+echo "Options used to compile and link:"
+echo "  with wallet   = $enable_wallet"
+echo "  with gui / qt = $bitcoin_enable_qt"
+if test x$bitcoin_enable_qt != xno; then
+    echo "    qt version  = $bitcoin_qt_got_major_vers"
+    echo "    with qr     = $use_qr"
+fi
+echo "  with zmq      = $use_zmq"
+echo "  with test     = $use_tests"
+echo "  with bench    = $use_bench"
+echo "  with upnp     = $use_upnp"
+echo "  use asm       = $use_asm"
+echo "  debug enabled = $enable_debug"
+echo "  werror        = $enable_werror"
+echo
+echo "  target os     = $TARGET_OS"
+echo "  build os      = $BUILD_OS"
+echo
+echo "  CC            = $CC"
+echo "  CFLAGS        = $CFLAGS"
+echo "  CPPFLAGS      = $CPPFLAGS"
+echo "  CXX           = $CXX"
+echo "  CXXFLAGS      = $CXXFLAGS"
+echo "  LDFLAGS       = $LDFLAGS"
+echo "  ARFLAGS       = $ARFLAGS"
+echo
